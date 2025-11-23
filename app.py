@@ -1,5 +1,6 @@
 import streamlit as st
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import pandas as pd
 import json
 import time
@@ -7,25 +8,28 @@ import os
 import io
 from PIL import Image
 from pypdf import PdfReader
-import fitz  # PyMuPDF (For Visual PDF Reading)
+import fitz  # PyMuPDF
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="MEP AI: The Final Execution", layout="wide", page_icon="🏗️")
+st.set_page_config(page_title="MEP AI: Gemini 2.5 System", layout="wide", page_icon="🏗️")
 
-# 🔑 API KEYS (ฝังตามคำสั่ง)
+# 🔑 API KEYS
 KEYS = {
     "ARCHITECT": "AIzaSyCWlcMMJddJ5xJQGKeEU8Cn2fcCIx3upXI", 
     "ENGINEER":  "AIzaSyBk9zUBY6TuYO13QxPw6ZVziENedIx0yJA", 
     "QS":        "AIzaSyB5e_5lXSnjlvIDL63OdV_BLBfQZvjaRuU"
 }
 
-def get_model(role):
+# โมเดลเป้าหมาย
+TARGET_MODEL = "gemini-2.5-flash"
+
+def get_client(role):
     try:
-        genai.configure(api_key=KEYS[role])
-        # พยายามใช้โมเดลใหม่ล่าสุด ถ้าไม่ได้ให้ถอยกลับมาตัวเสถียร
-        return genai.GenerativeModel('gemini-1.5-flash')
+        # ใช้ SDK ใหม่ google-genai
+        client = genai.Client(api_key=KEYS[role])
+        return client
     except Exception as e:
-        st.error(f"❌ API Error ({role}): {e}")
+        st.error(f"❌ Client Error ({role}): {e}")
         return None
 
 # --- 2. HELPER: CHAT LOG ---
@@ -35,25 +39,34 @@ def chat_log(placeholder, speaker, message, role="user"):
         st.chat_message(role, avatar=avatar).write(f"**{speaker}:** {message}")
         time.sleep(0.1)
 
-# --- 3. INTELLIGENT KNOWLEDGE ACCESS ---
+# --- 3. KNOWLEDGE ACCESS ---
 def get_pdf_images(filename, limit=5):
-    """แปลง PDF เป็นรูปภาพ เพื่อให้ A มองเห็นสัญลักษณ์"""
     path = os.path.join("Manuals", filename)
     images = []
+    # Fallback paths
+    if not os.path.exists(path):
+        if os.path.exists(filename): path = filename
+        else: return []
+
     if os.path.exists(path):
         try:
             doc = fitz.open(path)
-            for i in range(min(len(doc), limit)): # อ่าน 5 หน้าแรกที่เป็น Legend
+            for i in range(min(len(doc), limit)):
                 page = doc.load_page(i)
                 pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
                 img_data = pix.tobytes("png")
+                # แปลงเป็น PIL Image
                 images.append(Image.open(io.BytesIO(img_data)))
         except: pass
     return images
 
 def get_text_content(filename):
-    """อ่าน Text จาก PDF/CSV"""
     path = os.path.join("Manuals", filename)
+    # Fallback paths
+    if not os.path.exists(path):
+        if os.path.exists(filename): path = filename
+        else: return f"Missing {filename}"
+
     if os.path.exists(path):
         if filename.endswith(".pdf"):
             try:
@@ -67,122 +80,136 @@ def get_text_content(filename):
             except: return "Error Reading CSV"
     return f"Missing {filename}"
 
-# --- 4. AGENT WORKFLOW ---
+# --- 4. AGENT WORKFLOW (NEW SDK) ---
 
 def run_team_a(image, round_num, feedback, chat_ph):
-    """Team A: สถาปนิก (Visual Mode)"""
-    model = get_model("ARCHITECT")
-    
-    # โหลดคู่มือแบบรูปภาพ
+    client = get_client("ARCHITECT")
     legend_imgs = get_pdf_images("Engineering_Drawings_EE.pdf")
     
-    chat_log(chat_ph, "A6 สถาปนิกส้ม", f"เริ่มงานรอบที่ {round_num} ครับ (โหลดคู่มือรูปภาพ {len(legend_imgs)} หน้า)...", "user")
+    chat_log(chat_ph, "A6 สถาปนิกส้ม", f"เริ่มงานรอบที่ {round_num} (Model: {TARGET_MODEL})...", "user")
     
     prompt = f"""
-    คุณคือ "Team A" ทีมสถาปนิกถอดแบบ 6 คน
+    คุณคือ "Team A" ทีมสถาปนิก 6 คน
     บริบท: รอบที่ {round_num}, คำสั่งแก้: {feedback if feedback else "-"}
     
-    **คำสั่งพิเศษ:** ฉันแนบ "รูปภาพคู่มือสัญลักษณ์" ไปให้ด้วย 
-    ให้คุณเทียบรูปร่างอุปกรณ์ในแบบแปลน กับรูปในคู่มือให้แม่นยำที่สุด
+    คำสั่งพิเศษ: เทียบรูปร่างอุปกรณ์ในแบบแปลน กับรูปภาพคู่มือสัญลักษณ์ที่แนบไปให้
     
-    สมาชิกทีม:
-    1. **A1 สถาปนิกดำ (Grid):** สแกนละเอียด
-    2. **A2 สถาปนิกแดง (Visual Matcher):** ดูรูปคู่มือแล้วเทียบสัญลักษณ์
-    3. **A3 สถาปนิกขาว (Text):** อ่าน Label
-    4. **A4 สถาปนิกเขียว (Context):** "ตาเห็นอะไรบันทึกอันนั้น" ห้ามเดา
-    5. **A5 สถาปนิกฟ้า (Trace):** ไล่สาย
-    6. **A6 สถาปนิกส้ม (Lead):** สรุปผล
-    
-    **MANDATORY:** ห้ามส่งกระดาษเปล่า!
+    หน้าที่:
+    1. A1 (Grid): สแกนละเอียด
+    2. A2 (Visual): ดูรูปคู่มือแล้วเทียบสัญลักษณ์
+    3. A3 (Text): อ่าน Label
+    4. A4 (Context): ห้ามเดาบริบท
+    5. A5 (Trace): ไล่สาย
+    6. A6 (Lead): สรุปผล JSON
     
     Output JSON: [ {{"room": "...", "item": "...", "spec": "...", "qty": 0}} ]
     """
+    
     try:
-        # ส่ง Prompt + แบบแปลน + รูปคู่มือ
+        # SDK ใหม่: ส่ง contents เป็น list ได้เลย (Text + Images)
         contents = [prompt, image] + legend_imgs
-        response = model.generate_content(contents)
+        
+        # เรียก API แบบใหม่
+        response = client.models.generate_content(
+            model=TARGET_MODEL,
+            contents=contents
+        )
+        
         data = json.loads(response.text.replace("```json", "").replace("```", "").strip())
-        chat_log(chat_ph, "A6 สถาปนิกส้ม", f"สรุปยอดได้ {len(data)} รายการ ส่งต่อทีมวิศวกรครับ", "user")
+        chat_log(chat_ph, "A6 สถาปนิกส้ม", f"เจอ {len(data)} รายการครับ", "user")
         return data
     except Exception as e:
         chat_log(chat_ph, "System", f"Error A: {e}", "assistant")
-        return [{"room": "Check", "item": "Manual", "spec": "-", "qty": 1}]
+        # Fallback ถ้า 2.5 ยังใช้ไม่ได้ ให้ลอง 1.5
+        if "404" in str(e) or "not found" in str(e).lower():
+             chat_log(chat_ph, "System", "Gemini 2.5 not found, falling back to 1.5...", "assistant")
+             try:
+                 response = client.models.generate_content(model="gemini-1.5-flash", contents=contents)
+                 data = json.loads(response.text.replace("```json", "").replace("```", "").strip())
+                 return data
+             except: pass
+        return [{"room": "Error", "item": "Check Manual", "spec": "-", "qty": 1}]
 
 def run_team_b(data, round_num, chat_ph):
-    """Team B: วิศวกร (Text Rules)"""
-    model = get_model("ENGINEER")
+    client = get_client("ENGINEER")
     manual_text = get_text_content("วสท64_compressed.pdf")
     
-    chat_log(chat_ph, "B6 วิศวกรสมหมาย", "ทีม B รับเรื่องแล้วครับ กำลังตรวจสอบ...", "assistant")
+    chat_log(chat_ph, "B6 วิศวกรสมหมาย", "ทีม B กำลังตรวจสอบ...", "assistant")
     
     prompt = f"""
-    คุณคือ "Team B" วิศวกรตรวจสอบ 6 คน นำโดย วิศวกรบุญชู
+    คุณคือ "Team B" วิศวกร 6 คน
     ข้อมูล: {json.dumps(data, ensure_ascii=False)}
-    
-    --- มาตรฐาน วสท. ---
-    {manual_text[:10000]}...
-    ---------------------
+    มาตรฐาน: {manual_text[:10000]}...
     
     เงื่อนไข:
-    - รอบ 1: บังคับหาที่ผิดและสั่งแก้ (REJECTED)
-    - รอบ 2: อนุมัติ (APPROVED)
+    - รอบ 1: บังคับ REJECTED เพื่อแก้
+    - รอบ 2: APPROVED
     
     Output: REJECTED: [...] หรือ APPROVED: [...]
     """
-    response = model.generate_content(prompt)
-    text = response.text
     
-    if "REJECTED" in text:
-        chat_log(chat_ph, "B1 วิศวกรบุญชู", "มีจุดต้องแก้ครับ! เรื่องความปลอดภัยสำคัญมาก", "assistant")
-    else:
-        chat_log(chat_ph, "B6 วิศวกรสมหมาย", "แบบสมบูรณ์แล้วครับ อนุมัติให้สร้างได้ ✅", "assistant")
-        
-    return text
+    try:
+        response = client.models.generate_content(
+            model=TARGET_MODEL,
+            contents=prompt
+        )
+        return response.text
+    except Exception as e:
+        # Fallback
+        try:
+            response = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
+            return response.text
+        except: return "Error B"
 
 def run_team_c_d(data, chat_ph):
-    """Team C & D: Execution"""
-    model = get_model("QS")
+    client = get_client("QS")
     price_list = get_text_content("Price_List.csv")
     
-    # D: Method
-    chat_log(chat_ph, "D โฟร์แมน", "กำลังเขียนคู่มือติดตั้ง...", "user")
-    prompt_d = f"เขียน Method Statement ภาษาไทย สำหรับ: {data}"
-    method_d = model.generate_content(prompt_d).text
+    # D
+    chat_log(chat_ph, "D โฟร์แมน", "เขียนวิธีทำ...", "user")
+    prompt_d = f"เขียน Method Statement ภาษาไทย: {data}"
+    try:
+        method_d = client.models.generate_content(model=TARGET_MODEL, contents=prompt_d).text
+    except:
+        method_d = client.models.generate_content(model="gemini-1.5-flash", contents=prompt_d).text
     
-    # C: BOQ
-    chat_log(chat_ph, "C QS", "กำลังคำนวณราคาจาก CSV...", "assistant")
+    # C
+    chat_log(chat_ph, "C QS", "คำนวณราคา...", "assistant")
     prompt_c = f"""
-    คุณคือ C (QS) ทำ BOQ 4 ตาราง จาก Price List นี้เท่านั้น:
+    คุณคือ C (QS) ทำ BOQ 4 ตาราง จาก Price List นี้:
     {price_list}
     
     ข้อมูล: {data}
     วิธีทำ: {method_d}
-    
     Output JSON Keys: [table_1_total, table_2_mat, table_3_lab, table_4_po]
     """
     try:
-        res = model.generate_content(prompt_c)
+        res = client.models.generate_content(model=TARGET_MODEL, contents=prompt_c)
         boq = json.loads(res.text.replace("```json", "").replace("```", "").strip())
-        chat_log(chat_ph, "C QS", "คำนวณเสร็จสิ้นครับ", "assistant")
         return method_d, boq
     except:
-        return method_d, {"error": "JSON Error"}
+        # Fallback
+        try:
+            res = client.models.generate_content(model="gemini-1.5-flash", contents=prompt_c)
+            boq = json.loads(res.text.replace("```json", "").replace("```", "").strip())
+            return method_d, boq
+        except: return method_d, {"error": "JSON Error"}
 
 # --- 5. MAIN UI ---
 def main():
-    st.title("🏗️ MEP AI: Final Execution")
+    st.title(f"🏗️ MEP AI: GenAI SDK ({TARGET_MODEL})")
     
     # Check Files
     c1, c2, c3 = st.columns(3)
     with c1: 
         if os.path.exists("Manuals/Engineering_Drawings_EE.pdf"): st.success("✅ A: Visual Legend OK")
-        else: st.error("❌ ขาดไฟล์ Engineering_Drawings_EE.pdf")
+        else: st.error("❌ ขาดไฟล์ A")
     with c2:
         if os.path.exists("Manuals/วสท64_compressed.pdf"): st.success("✅ B: Standard OK")
-        else: st.warning("⚠️ ขาดไฟล์ วสท. (ใช้กฎทั่วไป)")
+        else: st.warning("⚠️ ขาดไฟล์ B")
     with c3:
         if os.path.exists("Manuals/Price_List.csv"): st.success("✅ C: Price DB OK")
-        else: st.error("❌ ขาดไฟล์ Price_List.csv")
+        else: st.error("❌ ขาดไฟล์ C")
 
     uploaded_file = st.file_uploader("📂 อัปโหลดแบบแปลน", type=['png', 'jpg'])
     
@@ -191,7 +218,6 @@ def main():
         st.image(image, caption="Blueprint", width=400)
         
         if st.button("🚀 START SYSTEM"):
-            st.markdown("### 💬 Live Operation Log")
             chat_container = st.container()
             chat_ph = chat_container.empty()
             
@@ -203,37 +229,48 @@ def main():
                 final_data = None
                 if "REJECTED" in res_b1:
                     feedback = res_b1.replace("REJECTED:", "").strip()
-                    st.warning(f"📝 **สั่งแก้ไข (Round 1):** {feedback}")
+                    st.warning(f"📝 **สั่งแก้:** {feedback}")
                     
                     # Round 2
                     data_r2 = run_team_a(image, 2, feedback, chat_ph)
                     res_b2 = run_team_b(data_r2, 2, chat_ph)
                     
                     try:
-                        json_str = res_b2.split("APPROVED:")[1].strip() if "APPROVED:" in res_b2 else res_b2
-                        final_data = json.loads(json_str.replace("```json", "").replace("```", "").strip())
-                        st.success("🏆 **Final Approved Draft**")
-                        st.json(final_data)
+                        if "APPROVED" in res_b2:
+                            json_str = res_b2.split("APPROVED:")[1].strip()
+                            final_data = json.loads(json_str.replace("```json", "").replace("```", "").strip())
+                            st.success("🏆 **Final Approved**")
+                            st.json(final_data)
+                        else:
+                            st.error("Still Rejected")
                     except: st.error("Error Parsing Final")
                 else:
                     st.success("Approved in Round 1")
-                    
+                    try:
+                        # Try parse if B approved immediately
+                        json_str = res_b1.split("APPROVED:")[1].strip()
+                        final_data = json.loads(json_str.replace("```json", "").replace("```", "").strip())
+                    except: final_data = data_r1 # fallback
+
                 # Execution
                 if final_data:
                     st.markdown("---")
-                    method_d, boq = run_team_c_d(final_data, chat_ph)
-                    
-                    st.info(f"👷 **Method Statement:**\n{method_d[:500]}...")
+                    method, boq = run_team_c_d(final_data, chat_ph)
+                    st.info(f"👷 **Method:**\n{method[:300]}...")
                     
                     if "error" not in boq:
-                        t1, t2, t3, t4 = st.tabs(["รวม", "ค่าของ", "ค่าแรง", "PO"])
+                        t1,t2,t3,t4 = st.tabs(["Total","Mat","Lab","PO"])
+                        
                         def show(k):
                             if k in boq:
                                 df = pd.DataFrame(boq[k])
                                 st.dataframe(df, use_container_width=True)
                                 if 'รวมเป็นเงิน' in df.columns:
-                                    total = df['รวมเป็นเงิน'].astype(str).str.replace(',','').astype(float).sum()
-                                    st.metric("Total", f"{total:,.2f} THB")
+                                    try:
+                                        tot = df['รวมเป็นเงิน'].astype(str).str.replace(',','').astype(float).sum()
+                                        st.metric("Total", f"{tot:,.2f}")
+                                    except: pass
+                        
                         with t1: show("table_1_total")
                         with t2: show("table_2_mat")
                         with t3: show("table_3_lab")
