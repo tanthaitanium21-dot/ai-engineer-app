@@ -26,10 +26,10 @@ with st.sidebar:
     api_qs = st.text_input("QS API Key", value="", type="password")
     
     st.markdown("---")
-    st.markdown("**Model:** Gemini 1.5 Flash (Standard for logic)")
+    st.markdown("**Model:** Gemini 2.5 Flash (Standard for logic)")
     # หมายเหตุ: แม้คุณขอ 2.5 แต่ Library ปัจจุบันรองรับชื่อรุ่นมาตรฐานคือ 1.5 Flash 
     # หากบัญชีของคุณรองรับ 2.5 แล้ว สามารถเปลี่ยนชื่อรุ่นตรงนี้ได้ครับ
-    model_name = "gemini-1.5-flash" 
+    model_name = "gemini-2.5-flash" 
 
 # --- ฟังก์ชันเรียกใช้งาน Gemini ---
 def call_gemini_agent(api_key, system_instruction, user_prompt, image_data=None):
