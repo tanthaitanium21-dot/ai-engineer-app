@@ -1,1 +1,214 @@
-"""\napp.py\nConcise Streamlit BOQ app with real PDF parsing (pdfplumber optional) and price list loading.\n"""\nimport os\nimport io\nimport uuid\nimport sqlite3\nimport datetime\nimport re\nimport pandas as pd\nimport streamlit as st\n\ntry:\n    import pdfplumber\nexcept Exception:\n    pdfplumber = None\n\n# Config\nDB_PATH = os.getenv('BOQ_APP_DB','boq_app.db')\nPRICE_CSV_CACHE = 'price_list_cache.csv'\nTEST_PDF_PATH = '/mnt/data/7dfdf93c-beb9-4abf-a1eb-7668cd324077.pdf'\n\ndef init_db():\n    conn = sqlite3.connect(DB_PATH, check_same_thread=False)\n    c = conn.cursor()\n    c.execute("""CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT, description TEXT, created_at TEXT)""")\n    c.execute("""CREATE TABLE IF NOT EXISTS submissions (id TEXT PRIMARY KEY, project_id TEXT, role TEXT, filename TEXT, metadata TEXT, version INTEGER, created_at TEXT)""")\n    c.execute("""CREATE TABLE IF NOT EXISTS boqs (id TEXT PRIMARY KEY, project_id TEXT, submission_id TEXT, data_blob BLOB, created_at TEXT)""")\n    c.execute("""CREATE TABLE IF NOT EXISTS price_list (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT, description TEXT, unit TEXT, unit_price REAL, source TEXT)""")\n    conn.commit()\n    return conn\n\nconn = init_db()\n\ndef extract_text_pdfplumber_bytes(b: bytes) -> str:\n    if pdfplumber is None:\n        return ''\n    txt = ''\n    try:\n        with pdfplumber.open(io.BytesIO(b)) as pdf:\n            for p in pdf.pages:\n                t = p.extract_text()\n                if t: txt += t + '\n'\n    except Exception:\n        return ''\n    return txt\n\ndef parse_pdf_real(b: bytes) -> pd.DataFrame:\n    text = extract_text_pdfplumber_bytes(b)\n    if not text:\n        st.warning('ไม่พบข้อความใน PDF (ลองใช้ไฟล์อื่นหรือติดตั้ง OCR)')\n        return pd.DataFrame()\n    lines = [l.strip() for l in text.splitlines() if l.strip()]\n    pattern = r"(.+?)\s+(\d+(?:[.,]\d+)?)\s+([A-Za-zก-๙/%\"\.]+)$"\n    rows = []\n    for ln in lines:\n        m = re.search(pattern, ln)\n        if m:\n            desc = m.group(1)\n            qty = float(m.group(2).replace(',','.'))\n            unit = m.group(3)\n            # try extract code at start\n            code_match = re.match(r'([A-Za-z0-9\-\._/]+)\s+', ln)\n            code = code_match.group(1) if code_match else ''\n            rows.append({'item_code': code, 'description': desc, 'qty': qty, 'unit': unit})\n    if not rows:\n        # fallback: return raw text for manual inspection\n        return pd.DataFrame({'raw_text':[text]})\n    return pd.DataFrame(rows)\n\ndef load_price_csv(path_or_buf):\n    try:\n        df = pd.read_csv(path_or_buf, encoding='utf-8')\n    except Exception:\n        try:\n            df = pd.read_csv(path_or_buf, encoding='latin1')\n        except Exception:\n            df = pd.DataFrame()\n    return df\n\ndef match_price_stub(items_df: pd.DataFrame, price_df: pd.DataFrame) -> pd.DataFrame:\n    out = items_df.copy()\n    out['matched_code'] = None\n    out['matched_unit_price'] = None\n    out['match_confidence'] = 0.0\n    if price_df is None or price_df.empty:\n        return out\n    for idx, row in out.iterrows():\n        desc = str(row.get('description','')).lower()\n        try:\n            cand = price_df[price_df['description'].str.lower().str.contains(desc.split()[0])]\n        except Exception:\n            cand = price_df[price_df['description'].str.lower().str.contains(desc)] if not price_df.empty else pd.DataFrame()\n        if not cand.empty:\n            out.at[idx,'matched_code'] = cand.iloc[0]['code'] if 'code' in cand.columns else ''\n            try: out.at[idx,'matched_unit_price'] = float(cand.iloc[0]['unit_price'])\n            except Exception: out.at[idx,'matched_unit_price'] = None\n            out.at[idx,'match_confidence'] = 0.75\n    return out\n\ndef calculate_boq(df: pd.DataFrame) -> pd.DataFrame:\n    d = df.copy()\n    d['material_cost'] = d.apply(lambda r: (r.get('matched_unit_price') or 0)*r['qty'], axis=1)\n    d['labor_cost'] = d['material_cost'] * 0.10\n    d['total_cost'] = d['material_cost'] + d['labor_cost']\n    return d\n\ndef save_submission(project_id, role, filename, metadata):\n    sid = str(uuid.uuid4())\n    version = get_latest_version(project_id) + 1\n    now = datetime.datetime.utcnow().isoformat()\n    c = conn.cursor()\n    c.execute('INSERT INTO submissions (id, project_id, role, filename, metadata, version, created_at) VALUES (?,?,?,?,?,?,?)', (sid, project_id, role, filename, metadata, version, now))\n    conn.commit()\n    return sid\n\ndef get_latest_version(project_id):\n    c = conn.cursor()\n    c.execute('SELECT MAX(version) FROM submissions WHERE project_id = ?', (project_id,))\n    r = c.fetchone()\n    return int(r[0]) if r and r[0] is not None else 0\n\ndef save_boq_blob(project_id, submission_id, excel_bytes):\n    bid = str(uuid.uuid4())\n    now = datetime.datetime.utcnow().isoformat()\n    c = conn.cursor()\n    c.execute('INSERT INTO boqs (id, project_id, submission_id, data_blob, created_at) VALUES (?,?,?,?,?)', (bid, project_id, submission_id, sqlite3.Binary(excel_bytes), now))\n    conn.commit()\n    return bid\n\n# Streamlit UI\nst.set_page_config(page_title='BOQ A-B-C-D Workflow', layout='wide')\nst.title('BOQ — A/B/C/D Workflow (Concise)')\n\nwith st.sidebar:\n    st.header('Config')\n    role = st.selectbox('ฉันทําหน้าที่เป็น', ['A (Architect)','B (Engineer)','C (Cost)','D (Scope)'])\n    project_name = st.text_input('Project name', value='ตัวอย่างโปรเจกต์')\n    project_desc = st.text_area('Project description', value='คำอธิบายสั้น ๆ ของโปรเจกต์')\n    st.markdown('---')\n    st.subheader('ไฟล์สมอง / Price list')\n    use_github_files = st.checkbox('ใช้ไฟล์จาก GitHub (A/B/C) ถ้ามี', value=True)\n    st.write('Test PDF (local):', TEST_PDF_PATH)\n    if st.button('สร้าง/บันทึก project'):\n        pid = str(uuid.uuid4())\n        now = datetime.datetime.utcnow().isoformat()\n        c = conn.cursor()\n        c.execute('INSERT INTO projects (id, name, description, created_at) VALUES (?,?,?,?)', (pid, project_name, project_desc, now))\n        conn.commit()\n        st.success(f'สร้าง project แล้ว (ID: {pid})')\n\nst.subheader('Price list (for matching)')\ncol1, col2 = st.columns([3,1])\nwith col1:\n    uploaded_price = st.file_uploader('อัปโหลด Price_List.csv (optional)', type=['csv'], key='price_csv')\n    if uploaded_price is not None:\n        price_df = load_price_csv(uploaded_price)\n        price_df.to_csv(PRICE_CSV_CACHE, index=False)\n        st.success('อัปโหลดและเก็บ price list ชั่วคราวเรียบร้อย')\n    else:\n        try:\n            price_df = load_price_csv(PRICE_CSV_CACHE)\n        except Exception:\n            price_df = pd.DataFrame()\n        if price_df.empty and use_github_files:\n            GITHUB_BASE = 'https://raw.githubusercontent.com/tanthaitanium21-dot/ai-engineer-app/main/Manuals/'\n            PRICE_LIST_URL = GITHUB_BASE + 'Price_List.csv'\n            try:\n                price_df = load_price_csv(PRICE_LIST_URL)\n                st.success('โหลด Price_List.csv จาก GitHub สำเร็จ')\n                price_df.to_csv(PRICE_CSV_CACHE, index=False)\n            except Exception as e:\n                st.warning(f'โหลด Price_List.csv จาก GitHub ไม่สำเร็จ: {e}')\n        if price_df.empty:\n            st.info('ไม่มี price list cache — โปรดอัปโหลดไฟล์ Price_List.csv')\nwith col2:\n    if st.button('ดู price sample'):\n        st.write(price_df.head(10) if price_df is not None else 'ไม่มี price list')\n\nst.markdown('---')\n\nif role.startswith('A'):\n    st.header('หน้า A — สถาปนิก: ส่งแบบ (Upload)')\n    file = st.file_uploader('อัปโหลดไฟล์แบบ (PDF/ZIP)', type=['pdf','zip','dwg'], key='a_upload')\n    notes = st.text_area('หมายเหตุถึงทีม B')\n    if st.button('ส่งแบบให้ B') and file is not None:\n        raw = file.read()\n        uploads_dir = 'uploads'\n        os.makedirs(uploads_dir, exist_ok=True)\n        fname = f"{uuid.uuid4()}_{file.name}"\n        path = os.path.join(uploads_dir, fname)\n        with open(path, 'wb') as f:\n            f.write(raw)\n        pid = 'demo-project'\n        sid = save_submission(pid, 'A', fname, notes)\n        st.success(f'ส่งแบบเรียบร้อย (submission id: {sid})')\n        st.info('ระบบจะรัน parser จริงและสร้างตารางตัวอย่างให้ B ตรวจ')\n        parsed = parse_pdf_real(raw)\n        st.dataframe(parsed)\n    st.markdown('### ทดสอบ: โหลด PDF ตัวอย่างจากระบบ (local)')\n    if st.button('โหลด PDF ตัวอย่าง (local)'):\n        if os.path.exists(TEST_PDF_PATH):\n            with open(TEST_PDF_PATH,'rb') as f:\n                raw = f.read()\n            parsed = parse_pdf_real(raw)\n            st.subheader('ผลการ parse จากไฟล์ทดสอบ')\n            st.dataframe(parsed)\n        else:\n            st.error('ไม่พบไฟล์ทดสอบที่ path นั้น')\n\nelif role.startswith('B'):\n    st.header('หน้า B — วิศวกร: ตรวจแบบ & สรุป')\n    c = conn.cursor()\n    c.execute('SELECT id, project_id, role, filename, metadata, version, created_at FROM submissions ORDER BY created_at DESC LIMIT 20')\n    subs = c.fetchall()\n    if not subs:\n        st.write('ยังไม่มี submission — ขอให้ A ส่งแบบก่อน')\n    else:\n        df_subs = pd.DataFrame(subs, columns=['id','project_id','role','filename','metadata','version','created_at'])\n        st.dataframe(df_subs)\n        chosen = st.text_input('เลือก submission id ที่จะตรวจ')\n        if st.button('โหลด submission') and chosen:\n            row = df_subs[df_subs['id']==chosen]\n            if row.empty:\n                st.error('ไม่พบ submission id')\n            else:\n                fname = row.iloc[0]['filename']\n                path = os.path.join('uploads', fname)\n                if os.path.exists(path):\n                    with open(path,'rb') as f:\n                        raw = f.read()\n                    parsed = parse_pdf_real(raw)\n                    st.subheader('ผลการ parse (จริง)')\n                    st.dataframe(parsed)\n                    if st.button('สรุปแบบและส่งกลับให้ A (request changes)'):\n                        st.success('ส่งคำขอกลับให้ A เรียบร้อย — (demo)')\n\nelif role.startswith('D'):\n    st.header('หน้า D — ส่งรายละเอียดงานให้ C')\n    scope_text = st.text_area('รายละเอียดงาน (Scope)')\n    if st.button('ส่งให้ C') and scope_text:\n        sid = save_submission('demo-project','D','scope_text.txt', scope_text)\n        st.success(f'ส่ง scope ให้ C แล้ว (submission id: {sid})')\n\nelif role.startswith('C'):\n    st.header('หน้า C — สรุปราคา & สร้าง BOQ')\n    uploaded = st.file_uploader('(ทางเลือก) อัปโหลด PDF แบบถ้าต้องการทดสอบ parser', type=['pdf'], key='c_upload')\n    if uploaded is not None:\n        raw = uploaded.read()\n        items = parse_pdf_real(raw)\n        st.subheader('รายการที่ดึงได้ (parsed)')\n        st.dataframe(items)\n        matched = match_price_stub(items, price_df if 'price_df' in locals() else pd.DataFrame())\n        st.subheader('หลังแม็ปราคา (candidate)')\n        st.dataframe(matched)\n        st.markdown('**ปรับราคา / เลือกรายการที่แม็ป**')\n        editable = matched.copy()\n        for i in editable.index:\n            col1, col2 = st.columns([2,1])\n            with col1:\n                editable.at[i, 'matched_unit_price'] = st.number_input(f"ราคา: {editable.at[i,'description']}", value=float(editable.at[i,'matched_unit_price'] or 0.0), key=f'price_{i}')\n            with col2:\n                editable.at[i, 'qty'] = st.number_input(f"ปริมาณ: {editable.at[i,'description']}", value=float(editable.at[i,'qty']), key=f'qty_{i}')\n        boq_df = calculate_boq(editable)\n        st.subheader('BOQ preview — ตาราง 1: ของ+ค่าแรง')\n        st.dataframe(boq_df)\n        table_material_plus_labor = boq_df.copy()\n        table_material = boq_df[['item_code','description','qty','unit','matched_unit_price','material_cost']]\n        table_labor = boq_df[['item_code','description','qty','unit','labor_cost']]\n        table_po = pd.DataFrame([{'supplier':'TBD','amount': table_material_plus_labor['total_cost'].sum()}])\n        to_download = io.BytesIO()\n        with pd.ExcelWriter(to_download, engine='openpyxl') as writer:\n            table_material_plus_labor.to_excel(writer, sheet_name='ของ_ค่าของ+ค่าแรง', index=False)\n            table_material.to_excel(writer, sheet_name='ค่าของ', index=False)\n            table_labor.to_excel(writer, sheet_name='ค่าแรง', index=False)\n            table_po.to_excel(writer, sheet_name='PO', index=False)\n        to_download.seek(0)\n        if st.button('บันทึก BOQ และสรุปเป็นไฟล์ Excel'):\n            sid = save_submission('demo-project','C', uploaded.name if uploaded else 'generated', 'BOQ generated by C')\n            bid = save_boq_blob('demo-project', sid, to_download.getvalue())\n            st.success(f'บันทึก BOQ เรียบร้อย (boq id: {bid})')\n            st.download_button('ดาวน์โหลดไฟล์ BOQ (.xlsx)', data=to_download.getvalue(), file_name=f'BOQ_{project_name}.xlsx')\n\nst.markdown('---')\nwith st.expander('Admin / Debug'):\n    st.write('DB path: ', DB_PATH)\n    if st.button('ล้าง DB ตัวอย่าง (danger)'):\n        c = conn.cursor()\n        c.execute('DELETE FROM submissions')\n        c.execute('DELETE FROM projects')\n        c.execute('DELETE FROM boqs')\n        conn.commit()\n        st.warning('ลบข้อมูลทั้งหมดแล้ว — ใช้ใน demo เท่านั้น')\n    st.write('Recent BOQ records:')\n    c = conn.cursor()\n    c.execute('SELECT id, project_id, submission_id, created_at FROM boqs ORDER BY created_at DESC LIMIT 10')\n    rows = c.fetchall()\n    st.dataframe(rows)\n
+import os
+import io
+import uuid
+import sqlite3
+import datetime
+import pandas as pd
+import streamlit as st
+
+from pypdf import PdfReader
+
+# ---------------------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------------------
+DB_PATH = "boq_app.db"
+
+ARCH_API_KEY = os.getenv("ARCH_API_KEY")
+ENG_API_KEY = os.getenv("ENG_API_KEY")
+PRICE_API_KEY = os.getenv("PRICE_API_KEY")
+
+# ---------------------------------------------------------------------
+# DATABASE INIT
+# ---------------------------------------------------------------------
+def init_db():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    c = conn.cursor()
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS submissions (
+            id TEXT PRIMARY KEY,
+            role TEXT,
+            filename TEXT,
+            notes TEXT,
+            version INTEGER,
+            created_at TEXT
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS boq (
+            id TEXT PRIMARY KEY,
+            submission_id TEXT,
+            excel BLOB,
+            created_at TEXT
+        )
+    """)
+
+    conn.commit()
+    return conn
+
+conn = init_db()
+
+# ---------------------------------------------------------------------
+# PDF PARSER — REAL
+# ---------------------------------------------------------------------
+def parse_pdf(file_bytes: bytes) -> pd.DataFrame:
+    try:
+        reader = PdfReader(io.BytesIO(file_bytes))
+
+        text_join = ""
+        for page in reader.pages:
+            text_join += page.extract_text() + "\n"
+
+        rows = []
+        for line in text_join.split("\n"):
+            if any(x in line for x in ["สาย", "ท่อ", "LED", "ปลั๊ก", "ไฟ", "เบรกเกอร์"]):
+                rows.append({
+                    "description": line.strip(),
+                    "qty": 1,
+                    "unit": "ea"
+                })
+
+        if len(rows) == 0:
+            rows.append({"description": "ไม่พบข้อมูลใน PDF", "qty": 0, "unit": ""})
+
+        return pd.DataFrame(rows)
+
+    except Exception:
+        return pd.DataFrame([{"description": "PDF อ่านไม่ได้", "qty": 0, "unit": ""}])
+
+# ---------------------------------------------------------------------
+# PRICE LIST LOAD
+# ---------------------------------------------------------------------
+def load_price_list(uploaded):
+    if uploaded is None:
+        return pd.DataFrame(columns=["description", "unit", "unit_price"])
+    try:
+        return pd.read_csv(uploaded)
+    except:
+        return pd.DataFrame(columns=["description", "unit", "unit_price"])
+
+# ---------------------------------------------------------------------
+# MATCH PRICES
+# ---------------------------------------------------------------------
+def match_prices(items: pd.DataFrame, price_df: pd.DataFrame):
+    result = items.copy()
+    result["unit_price"] = 0
+
+    for i, row in result.iterrows():
+        desc = str(row["description"])
+        match = price_df[
+            price_df["description"].str.contains(desc.split()[0], case=False, na=False)
+        ]
+
+        if len(match) > 0:
+            result.at[i, "unit_price"] = float(match.iloc[0]["unit_price"])
+
+    result["material_cost"] = result["unit_price"] * result["qty"]
+    result["labor_cost"] = result["material_cost"] * 0.10
+    result["total_cost"] = result["material_cost"] + result["labor_cost"]
+
+    return result
+
+# ---------------------------------------------------------------------
+# SAVE BOQ
+# ---------------------------------------------------------------------
+def save_boq(submission_id: str, excel_bytes: bytes):
+    bid = str(uuid.uuid4())
+    now = datetime.datetime.utcnow().isoformat()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO boq (id, submission_id, excel, created_at) VALUES (?,?,?,?)",
+        (bid, submission_id, sqlite3.Binary(excel_bytes), now)
+    )
+    conn.commit()
+    return bid
+
+# ---------------------------------------------------------------------
+# UI START
+# ---------------------------------------------------------------------
+st.title("BOQ – 3 Agent Loop (A / B / C)")
+
+role = st.selectbox("Role", ["A - Architect", "B - Engineer", "C - Cost Engineer"])
+
+# ---------------------------------------------------------------------
+# A — Upload
+# ---------------------------------------------------------------------
+if role.startswith("A"):
+    st.header("A – Upload แบบ")
+
+    file = st.file_uploader("อัปโหลดแบบ (PDF)", type=["pdf"])
+    notes = st.text_area("ข้อความถึง B")
+
+    if st.button("ส่งแบบให้ B"):
+        if file is None:
+            st.error("ต้องอัปโหลด PDF ก่อน")
+        else:
+            raw = file.read()
+
+            sid = str(uuid.uuid4())
+            now = datetime.datetime.utcnow().isoformat()
+            c = conn.cursor()
+            c.execute(
+                "INSERT INTO submissions (id, role, filename, notes, version, created_at) VALUES (?,?,?,?,1,?)",
+                (sid, "A", file.name, notes, now)
+            )
+            conn.commit()
+
+            parsed = parse_pdf(raw)
+            st.success(f"ส่งแล้ว Submission ID: {sid}")
+            st.write("ผลการอ่าน PDF:")
+            st.dataframe(parsed)
+
+# ---------------------------------------------------------------------
+# B — Review
+# ---------------------------------------------------------------------
+elif role.startswith("B"):
+    st.header("B – ตรวจแบบจาก A")
+
+    c = conn.cursor()
+    subs = c.execute("SELECT * FROM submissions WHERE role='A' ORDER BY created_at DESC").fetchall()
+    df = pd.DataFrame(subs, columns=["id","role","filename","notes","version","created_at"])
+    st.dataframe(df)
+
+    sid = st.text_input("Submission ID ที่ต้องการโหลด")
+
+    if st.button("โหลดเพื่อตรวจ"):
+        row = df[df["id"] == sid]
+        if row.empty:
+            st.error("ไม่พบ Submission")
+        else:
+            st.success("โหลดสำเร็จ (DEMO ไม่มีไฟล์จริง)")
+            st.write("หมายเหตุจาก A:", row.iloc[0]["notes"])
+
+# ---------------------------------------------------------------------
+# C — BOQ
+# ---------------------------------------------------------------------
+elif role.startswith("C"):
+    st.header("C – สรุปราคา สร้าง BOQ")
+
+    pdf = st.file_uploader("อัปโหลด PDF", type=["pdf"])
+    price_csv = st.file_uploader("อัปโหลด Price_List.csv (ไม่ต้องมี errors=)", type=["csv"])
+
+    if pdf and price_csv:
+        pdf_bytes = pdf.read()
+        items = parse_pdf(pdf_bytes)
+        price_df = load_price_list(price_csv)
+
+        matched = match_prices(items, price_df)
+
+        st.write("รายการ + ราคา:")
+        st.dataframe(matched)
+
+        excel = io.BytesIO()
+        with pd.ExcelWriter(excel, engine="openpyxl") as w:
+            matched.to_excel(w, index=False, sheet_name="BOQ")
+
+        excel.seek(0)
+
+        st.download_button(
+            "ดาวน์โหลด BOQ.xlsx",
+            data=excel,
+            file_name="BOQ.xlsx"
+        )
+
