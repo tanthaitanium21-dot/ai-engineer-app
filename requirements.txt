@@ -1,6 +1,3 @@
 streamlit
-pandas
-google-genai
-pypdf
+google-generativeai
 pillow
-pymupdf
