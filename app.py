@@ -1,6 +1,5 @@
 import streamlit as st
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 import pandas as pd
 import json
 import time
@@ -9,26 +8,28 @@ from PIL import Image
 from pypdf import PdfReader
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="MEP AI: 3-Key Interactive System", layout="wide", page_icon="🏗️")
+st.set_page_config(page_title="MEP AI: Stable Interactive", layout="wide", page_icon="🏗️")
 
-# 🔑 แยก API KEYS ตามแผนก (3 กระเป๋า)
+# 🔑 แยก API KEYS (3 กระเป๋า)
 KEYS = {
-    "ARCHITECT": "AIzaSyCWlcMMJddJ5xJQGKeEU8Cn2fcCIx3upXI", # ทีม A
-    "ENGINEER":  "AIzaSyBk9zUBY6TuYO13QxPw6ZVziENedIx0yJA", # ทีม B
-    "QS":        "AIzaSyB5e_5lXSnjlvIDL63OdV_BLBfQZvjaRuU"  # ทีม C & D
+    "ARCHITECT": "AIzaSyCWlcMMJddJ5xJQGKeEU8Cn2fcCIx3upXI", 
+    "ENGINEER":  "AIzaSyBk9zUBY6TuYO13QxPw6ZVziENedIx0yJA", 
+    "QS":        "AIzaSyB5e_5lXSnjlvIDL63OdV_BLBfQZvjaRuU"
 }
 
-# ฟังก์ชันเลือก Client ตามบทบาท (พร้อม Retry Logic ในตัว)
-def get_client(role):
+# ฟังก์ชันเลือก Model Object ตามบทบาท (Stable SDK)
+def get_model_agent(role):
     try:
-        return genai.Client(api_key=KEYS[role])
+        genai.configure(api_key=KEYS[role])
+        # ใช้ Gemini 1.5 Flash ที่เสถียรที่สุดตอนนี้
+        return genai.GenerativeModel('gemini-1.5-flash')
     except Exception as e:
         st.error(f"❌ API Error ({role}): {e}")
         return None
 
-# --- 2. HELPER: CHAT LOGGER (UI ถาม-ตอบ) ---
+# --- 2. HELPER: CHAT LOGGER ---
 def chat_log(placeholder, speaker, message, role="user"):
-    """แสดงข้อความแบบ Chat Bubble"""
+    """แสดง Chat Bubble"""
     avatar = "👷‍♂️" if "สถาปนิก" in speaker or "A" in speaker else \
              "⚙️" if "วิศวกร" in speaker or "B" in speaker else \
              "💰" if "QS" in speaker or "C" in speaker else "👷"
@@ -38,25 +39,23 @@ def chat_log(placeholder, speaker, message, role="user"):
         time.sleep(0.2)
 
 # --- 3. HELPER: ROBUST GENERATE (กันตาย) ---
-def generate_with_retry(client, model, contents, retries=3):
-    """ฟังก์ชันเรียก AI แบบระบุ Client + Retry"""
+def generate_with_retry(model_agent, contents, retries=3):
+    """เรียก AI แบบกันหลุด"""
     for attempt in range(retries):
         try:
-            if isinstance(contents, list):
-                response = client.models.generate_content(model=model, contents=contents)
-            else:
-                response = client.models.generate_content(model=model, contents=contents)
-            return response
+            response = model_agent.generate_content(contents)
+            return response.text
         except Exception as e:
             if attempt < retries - 1:
-                time.sleep(2 * (attempt + 1))
+                time.sleep(2)
                 continue
             else:
-                raise e
+                return f"Error: {e}"
 
 # --- 4. KNOWLEDGE ACCESS ---
 def get_kb_content(filename):
     path = os.path.join("Manuals", filename)
+    # ลองหาทั้งในโฟลเดอร์และ root
     paths_to_try = [path, filename]
     for p in paths_to_try:
         if os.path.exists(p):
@@ -64,7 +63,7 @@ def get_kb_content(filename):
                 try:
                     reader = PdfReader(p)
                     text = ""
-                    for p in reader.pages[:20]: text += p.extract_text()
+                    for page in reader.pages[:20]: text += page.extract_text()
                     return text
                 except: return "Error PDF"
             elif filename.endswith(".csv"):
@@ -80,12 +79,11 @@ def run_team_a(image, round_num, feedback, chat_ph):
     🏗️ ทีม A: สถาปนิก 6 คน
     Key: ARCHITECT | Brain: Engineering_Drawings_EE.pdf
     """
-    client = get_client("ARCHITECT") # ใช้ Key สถาปนิก
+    agent = get_model_agent("ARCHITECT")
     kb_drawings = get_kb_content("Engineering_Drawings_EE.pdf")
     
-    # Chat Log
-    chat_log(chat_ph, "A6 (สถาปนิกส้ม)", f"ทีม A พร้อมครับ! เริ่มงานรอบที่ {round_num} คำสั่งแก้: {feedback if feedback else 'ไม่มี'}", "user")
-    chat_log(chat_ph, "A2 (สถาปนิกแดง)", "ผมกำลังเทียบสัญลักษณ์กับคู่มือ Engineering Drawing ครับ...", "user")
+    chat_log(chat_ph, "A6 (สถาปนิกส้ม)", f"ทีม A (Key 1) เริ่มงานรอบที่ {round_num} คำสั่งแก้: {feedback if feedback else 'ไม่มี'}", "user")
+    chat_log(chat_ph, "A2 (สถาปนิกแดง)", "กำลังเทียบสัญลักษณ์กับคู่มือ...", "user")
     
     prompt = f"""
     คุณคือ "Team A" (สถาปนิกถอดแบบ 6 คน)
@@ -101,32 +99,28 @@ def run_team_a(image, round_num, feedback, chat_ph):
     Output JSON List Only: [ {{"id": 1, "room": "...", "item": "...", "spec": "...", "qty": 0, "note": "Found by A2"}} ]
     """
     try:
-        # ใช้ Gemini 2.5 Flash ถ้าไม่ได้ถอยไป 1.5
-        try:
-            res = generate_with_retry(client, "gemini-2.5-flash", [prompt, image])
-        except:
-            res = generate_with_retry(client, "gemini-1.5-flash", [prompt, image])
-            
-        text = res.text.replace("```json", "").replace("```", "").strip()
+        res_text = generate_with_retry(agent, [prompt, image])
+        text = res_text.replace("```json", "").replace("```", "").strip()
         data = json.loads(text)
         
-        chat_log(chat_ph, "A4 (สถาปนิกเขียว)", f"ยืนยันห้องครับ: {', '.join(list(set([d.get('room','Unknown') for d in data])))}", "user")
-        chat_log(chat_ph, "A6 (สถาปนิกส้ม)", f"สรุปยอดได้ {len(data)} รายการ ส่งต่อให้ทีม B ครับ", "user")
+        chat_log(chat_ph, "A4 (สถาปนิกเขียว)", f"เช็คห้องเรียบร้อย: {', '.join(list(set([d.get('room','Unknown') for d in data])))}", "user")
+        chat_log(chat_ph, "A6 (สถาปนิกส้ม)", f"สรุปได้ {len(data)} รายการ ส่งต่อทีม B ครับ", "user")
         return data
     except Exception as e:
         chat_log(chat_ph, "System", f"Error A: {e}", "assistant")
-        return [{"id": 99, "room": "Error", "item": "Manual Check", "spec": "-", "qty": 1}]
+        # Fallback Data
+        return [{"id": 99, "room": "Error Check", "item": "Manual Verify", "spec": "-", "qty": 1}]
 
 def run_team_b(data_from_a, round_num, chat_ph):
     """
     ⚙️ ทีม B: วิศวกร 6 คน
     Key: ENGINEER | Brain: วสท64_compressed.pdf
     """
-    client = get_client("ENGINEER") # ใช้ Key วิศวกร
+    agent = get_model_agent("ENGINEER")
     kb_standard = get_kb_content("วสท64_compressed.pdf")
     
-    chat_log(chat_ph, "B6 (วิศวกรสมหมาย)", "ได้รับข้อมูลจาก A แล้วครับ ทีม B กำลังตรวจสอบ...", "assistant")
-    chat_log(chat_ph, "B1 (วิศวกรบุญชู)", "กำลังเช็คความปลอดภัยตาม วสท. (กันน้ำ/สายดิน)...", "assistant")
+    chat_log(chat_ph, "B6 (วิศวกรสมหมาย)", "ทีม B (Key 2) รับเรื่องแล้ว กำลังตรวจสอบ...", "assistant")
+    chat_log(chat_ph, "B1 (วิศวกรบุญชู)", "กำลังตรวจ Safety (กันน้ำ/สายดิน)...", "assistant")
     
     prompt = f"""
     คุณคือ "Team B" (วิศวกร 6 คน)
@@ -142,34 +136,30 @@ def run_team_b(data_from_a, round_num, chat_ph):
     
     Output Format: REJECTED: [...] หรือ APPROVED: [...]
     """
-    try:
-        res = generate_with_retry(client, "gemini-1.5-flash", prompt)
+    res_text = generate_with_retry(agent, prompt)
+    
+    if "REJECTED" in res_text:
+        chat_log(chat_ph, "B6 (วิศวกรสมหมาย)", "ไม่อนุมัติครับ! มีจุดต้องแก้ ส่งคืน A", "assistant")
+    else:
+        chat_log(chat_ph, "B6 (วิศวกรสมหมาย)", "อนุมัติแบบครับ ถูกต้องตามมาตรฐาน ✅", "assistant")
         
-        if "REJECTED" in res.text:
-            chat_log(chat_ph, "B6 (วิศวกรสมหมาย)", "มีจุดต้องแก้ไขครับ! ตีกลับไปที่ A", "assistant")
-        else:
-            chat_log(chat_ph, "B6 (วิศวกรสมหมาย)", "ตรวจสอบแล้วผ่านมาตรฐานครับ อนุมัติแบบ ✅", "assistant")
-            
-        return res.text
-    except Exception as e:
-        chat_log(chat_ph, "System", f"Error B: {e}", "assistant")
-        return "REJECTED: System Error, Please Retry"
+    return res_text
 
 def run_team_c_d(final_data, chat_ph):
     """
     💰 ทีม C & D: QS & Foreman
     Key: QS | Brain: Price_List.csv
     """
-    client = get_client("QS") # ใช้ Key QS
+    agent = get_model_agent("QS")
     price_list = get_kb_content("Price_List.csv")
     
     # D Work
-    chat_log(chat_ph, "D (โฟร์แมน)", "กำลังเขียนแผนงานติดตั้ง (Method Statement)...", "user")
+    chat_log(chat_ph, "D (โฟร์แมน)", "ทีม D (Key 3) กำลังเขียนแผนงานติดตั้ง...", "user")
     prompt_d = f"เขียน Method Statement ภาษาไทย สำหรับ: {final_data}"
-    method_d = generate_with_retry(client, "gemini-1.5-flash", prompt_d).text
+    method_d = generate_with_retry(agent, prompt_d)
     
     # C Work
-    chat_log(chat_ph, "C (QS)", "กำลังเปิดไฟล์ Price_List.csv เพื่อคำนวณราคา...", "assistant")
+    chat_log(chat_ph, "C (QS)", "ทีม C (Key 3) กำลังเปิดไฟล์ราคากลาง...", "assistant")
     prompt_c = f"""
     คุณคือ C (QS) ทำ BOQ 4 ตาราง โดยใช้ราคาจาก CSV นี้เท่านั้น:
     {price_list}
@@ -179,16 +169,15 @@ def run_team_c_d(final_data, chat_ph):
     Output JSON: [table_1_total, table_2_mat, table_3_lab, table_4_po]
     """
     try:
-        res = generate_with_retry(client, "gemini-1.5-flash", prompt_c)
-        chat_log(chat_ph, "C (QS)", "คำนวณเสร็จสิ้นครับ พร้อมออกใบ BOQ", "assistant")
-        return method_d, json.loads(res.text.replace("```json", "").replace("```", "").strip())
+        res_text = generate_with_retry(agent, prompt_c)
+        chat_log(chat_ph, "C (QS)", "คำนวณเสร็จสิ้น พร้อมออกเอกสารครับ", "assistant")
+        return method_d, json.loads(res_text.replace("```json", "").replace("```", "").strip())
     except:
         return method_d, {"error": "JSON Error"}
 
 # --- 6. MAIN UI ---
 def main():
-    st.title("🏗️ MEP AI: 3-Key Interactive System")
-    st.caption("Architecture: 3 API Keys | Chat Log | Robust Retry")
+    st.title("🏗️ MEP AI: 3-Key Stable System")
     
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -207,8 +196,8 @@ def main():
         image = Image.open(uploaded_file)
         st.image(image, caption="Blueprint", width=400)
         
-        if st.button("🚀 เริ่มระบบ 3-Key Operation"):
-            st.markdown("### 💬 Team Communication Log")
+        if st.button("🚀 เริ่มระบบปฏิบัติการ"):
+            st.markdown("### 💬 Team Chat Log")
             chat_container = st.container()
             
             # --- ROUND 1 ---
