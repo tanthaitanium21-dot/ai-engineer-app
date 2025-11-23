@@ -208,7 +208,7 @@ col1, col2 = st.columns([3,1])
 with col1:
     uploaded_price = st.file_uploader("อัปโหลด Price_List.csv (optional)", type=["csv"] , key='price_csv')
     if uploaded_price is not None:
-        price_df = pd.read_csv(uploaded_price)
+        price_df = pd.read_csv(uploaded_price, encoding='utf-8', errors='ignore')
         price_df.to_csv(PRICE_CSV_CACHE, index=False)
         st.success("อัปโหลดและเก็บ price list ชั่วคราวเรียบร้อย")
     else:
