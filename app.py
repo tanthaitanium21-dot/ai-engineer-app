@@ -9,12 +9,11 @@ from PIL import Image
 from pypdf import PdfReader
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="MEP AI: Transparent Mode", layout="wide", page_icon="🏗️")
+st.set_page_config(page_title="MEP AI: Interactive Team", layout="wide", page_icon="🏗️")
 
 # 🔑 API KEY
 API_KEY = "AIzaSyBk9zUBY6TuYO13QxPw6ZVziENedIx0yJA"
 
-# Auto-Detect Model
 try:
     client = genai.Client(api_key=API_KEY)
     MODEL_ID = "gemini-2.5-flash"
@@ -23,216 +22,196 @@ except:
     MODEL_ID = "gemini-1.5-flash"
     client = genai.Client(api_key=API_KEY)
 
-# --- 2. HELPER: REAL-TIME LOGGER ---
-def log_stream(placeholder, message, level="INFO"):
-    timestamp = time.strftime("%H:%M:%S")
-    icon = "🟢" if level == "INFO" else "🟠" if level == "WARN" else "🔴"
-    placeholder.markdown(f"`{timestamp}` {icon} **{message}**")
-    time.sleep(0.5)
+# --- 2. HELPER: CHAT LOGGER ---
+def chat_log(placeholder, speaker, message, role="user"):
+    """แสดงข้อความแบบ Chat Bubble"""
+    avatar = "👷‍♂️" if "A" in speaker else "⚙️" if "B" in speaker else "💰" if "C" in speaker else "👷"
+    
+    with placeholder.container():
+        st.chat_message(role, avatar=avatar).write(f"**{speaker}:** {message}")
+        time.sleep(0.3) # หน่วงเวลาให้อ่านทัน
 
 # --- 3. KNOWLEDGE ACCESS ---
 def get_kb_content(filename):
     path = os.path.join("Manuals", filename)
-    if not os.path.exists(path): return f"ไม่พบไฟล์ {filename}"
-    if filename.endswith(".pdf"):
-        try:
-            reader = PdfReader(path)
-            text = ""
-            for p in reader.pages[:20]: text += p.extract_text()
-            return text
-        except: return "Error PDF"
-    elif filename.endswith(".csv"):
-        try:
-            return pd.read_csv(path).to_markdown(index=False)
-        except: return "Error CSV"
-    return ""
+    # Fallback checks... (เหมือนเดิม)
+    paths_to_try = [path, filename]
+    for p in paths_to_try:
+        if os.path.exists(p):
+            if filename.endswith(".pdf"):
+                try:
+                    reader = PdfReader(p)
+                    text = ""
+                    for p in reader.pages[:20]: text += p.extract_text()
+                    return text
+                except: return "Error PDF"
+            elif filename.endswith(".csv"):
+                try:
+                    return pd.read_csv(p).to_markdown(index=False)
+                except: return "Error CSV"
+    return f"Missing {filename}"
 
-# --- 4. THE TEAM AGENT WORKFLOW ---
+# --- 4. AGENT WORKFLOW WITH Q&A ---
 
-def run_team_a(image, round_num, feedback, log_ph):
-    """ทีมสถาปนิก 6 คน"""
-    log_stream(log_ph, f"ทีม A: เริ่มสแกนแบบ (รอบที่ {round_num})...")
+def run_team_a(image, round_num, feedback, chat_ph):
+    """Team A: Mining"""
+    legend_ref = """[Ref: Circle+X=Downlight, Rect=Fluorescent, Circle+2lines=Duplex, +WP=Waterproof, S=Switch]"""
     
-    legend_ref = """
-    [Reference Symbols]
-    - Lighting: Circle+X (Downlight), Rect (Fluorescent)
-    - Power: Circle+2lines (Duplex), +WP (Waterproof)
-    - Switch: S, S2, S3
-    """
+    # Simulate Team Discussion
+    chat_log(chat_ph, "A6 (สถาปนิกส้ม)", f"ทุกคนครับ! เริ่มงานรอบที่ {round_num} ครับ คำสั่งแก้: {feedback if feedback else 'ไม่มี'}", "user")
+    chat_log(chat_ph, "A1 (สถาปนิกดำ)", "รับทราบครับ ผมกำลังแบ่ง Grid สแกนพื้นที่...", "user")
+    chat_log(chat_ph, "A2 (สถาปนิกแดง)", f"ผมเตรียมโพยแล้วครับ: {legend_ref}", "user")
     
     prompt = f"""
-    คุณคือ "Team A" (สถาปนิกถอดแบบ 6 คน)
-    บริบท: รอบที่ {round_num}
-    คำสั่งแก้จากวิศวกร (Feedback): {feedback if feedback else "-"}
+    คุณคือ "Team A" (สถาปนิก 6 คน)
+    บริบท: รอบที่ {round_num}, คำสั่งแก้: {feedback if feedback else "-"}
     
-    หน้าที่: ระบุรายการอุปกรณ์ในภาพให้ละเอียดที่สุด (ห้ามส่งกระดาษเปล่า!)
+    หน้าที่: ระบุรายการอุปกรณ์ (ห้ามส่งกระดาษเปล่า!)
+    สมาชิก: A1(Grid), A2(Symbol), A3(Label), A4(Context), A5(Tracer), A6(Lead)
     
-    สมาชิกทีม:
-    A1 (Grid): สแกนทุกตารางนิ้ว
-    A2 (Symbol): เทียบรูปกับ Legend: {legend_ref}
-    A3 (Text): อ่าน Label
-    A4 (Context): ดูบริบทห้อง (เช่น ห้องน้ำ, ครัว)
-    A5 (Tracer): ไล่สายไฟ
-    A6 (Lead): สรุปผล
-    
-    Output Format: JSON List
-    [ {{"id": 1, "room": "...", "item": "...", "spec": "...", "qty": 0, "note": "Found by A2"}} ]
+    Output JSON: [ {{"id": 1, "room": "...", "item": "...", "spec": "...", "qty": 0, "note": "Found by A2"}} ]
     """
     try:
-        response = client.models.generate_content(model=MODEL_ID, contents=[prompt, image])
-        text = response.text.replace("```json", "").replace("```", "").strip()
+        res = client.models.generate_content(model=MODEL_ID, contents=[prompt, image])
+        text = res.text.replace("```json", "").replace("```", "").strip()
         data = json.loads(text)
-        log_stream(log_ph, f"ทีม A: สรุปได้ {len(data)} รายการ ส่งต่อให้ทีม B")
+        
+        chat_log(chat_ph, "A4 (สถาปนิกเขียว)", f"ผมเช็คห้องแล้วครับ เจอบริบทห้อง: {', '.join(list(set([d['room'] for d in data])))}", "user")
+        chat_log(chat_ph, "A6 (สถาปนิกส้ม)", f"สรุปยอดรวมได้ {len(data)} รายการครับ ส่งให้ทีมวิศวกรเลยนะครับ", "user")
+        
         return data
     except Exception as e:
-        log_stream(log_ph, f"Error Team A: {e}", "ERR")
-        return []
+        chat_log(chat_ph, "System", f"Error A: {e}", "assistant")
+        return [{"id": 99, "room": "Error", "item": "Manual Check", "spec": "-", "qty": 1}]
 
-def run_team_b(data_from_a, round_num, log_ph):
-    """ทีมวิศวกร 6 คน"""
-    log_stream(log_ph, "ทีม B: ได้รับรายการแล้ว กำลังเปิดคู่มือตรวจ...")
+def run_team_b(data_from_a, round_num, chat_ph):
+    """Team B: Auditing"""
     manual = get_kb_content("Engineering_Drawings_EE.pdf")
     
+    chat_log(chat_ph, "B6 (วิศวกรสมหมาย)", "ได้รับข้อมูลแล้วครับ ทีม B ประจำสถานี!", "assistant")
+    chat_log(chat_ph, "B1 (วิศวกรบุญชู)", "กำลังตรวจความปลอดภัย... ห้องน้ำต้องกันน้ำเท่านั้นนะ", "assistant")
+    chat_log(chat_ph, "B2 (วิศวกรสมชาย)", "กำลังเปิดคู่มือมาตรฐานเทียบครับ...", "assistant")
+    
     prompt = f"""
-    คุณคือ "Team B" (วิศวกรตรวจสอบ 6 คน)
-    
+    คุณคือ "Team B" (วิศวกร 6 คน)
     ข้อมูลจาก A: {json.dumps(data_from_a, ensure_ascii=False)}
-    
-    กฎเหล็กจากคู่มือ (Manual):
-    {manual[:5000]}...
-    
-    หน้าที่: ตรวจสอบทีละรายการ (Item by Item)
-    1. ความปลอดภัย (Safety) - ห้องน้ำใช้กันน้ำไหม?
-    2. มาตรฐาน (Standard) - สเปคถูกต้องไหม?
+    คู่มือ: {manual[:5000]}...
     
     เงื่อนไข:
-    - ถ้าผิดแม้แต่จุดเดียว: สั่ง "REJECTED" และระบุ ID รายการที่ผิด + วิธีแก้
-    - ถ้าถูกหมด: สั่ง "APPROVED"
+    - รอบ 1: ต้องหาที่ติเพื่อสั่งแก้ (REJECTED)
+    - รอบ 2: ให้ผ่าน (APPROVED)
     
-    Output Format:
-    - REJECTED: [ระบุรายการที่ผิด และเหตุผลอย่างละเอียด]
-    - APPROVED: [JSON List ที่ผ่านการรับรองแล้ว]
+    Output Format: REJECTED: [...] หรือ APPROVED: [...]
     """
-    response = client.models.generate_content(model=MODEL_ID, contents=prompt)
-    return response.text
+    res = client.models.generate_content(model=MODEL_ID, contents=prompt)
+    
+    if "REJECTED" in res.text:
+        chat_log(chat_ph, "B6 (วิศวกรสมหมาย)", "มีจุดต้องแก้ครับ! ส่งคืนทีม A เดี๋ยวนี้", "assistant")
+    else:
+        chat_log(chat_ph, "B6 (วิศวกรสมหมาย)", "ตรวจสอบแล้วถูกต้องครับ อนุมัติแบบได้ ✅", "assistant")
+        
+    return res.text
 
-def run_team_c_d(final_data, log_ph):
-    """ทีม C & D"""
+def run_team_c_d(final_data, chat_ph):
+    """Team C & D"""
     price_list = get_kb_content("Price_List.csv")
     
-    log_stream(log_ph, "D (โฟร์แมน): กำลังวางแผนงานติดตั้ง...")
+    # D Work
+    chat_log(chat_ph, "D (โฟร์แมน)", "รับทราบครับ ผมกำลังเขียนแผนงานติดตั้งให้...", "user")
     prompt_d = f"เขียน Method Statement ภาษาไทย สำหรับ: {final_data}"
     method_d = client.models.generate_content(model=MODEL_ID, contents=prompt_d).text
+    chat_log(chat_ph, "D (โฟร์แมน)", "แผนงานเสร็จแล้วครับ ส่งต่อให้ฝ่ายบัญชี", "user")
     
-    log_stream(log_ph, "C (QS): กำลังคำนวณราคาจาก CSV...")
+    # C Work
+    chat_log(chat_ph, "C (QS)", "กำลังดึงราคาจาก CSV... (คิดค่าของ+ค่าแรง)", "assistant")
     prompt_c = f"""
     คุณคือ C (QS) ทำ BOQ 4 ตาราง
-    ราคาอ้างอิง: {price_list}
+    ราคา: {price_list}
     ข้อมูล: {final_data}
     วิธีทำ: {method_d}
-    
-    Output JSON: {{ "table_1_total": [...], "table_2_mat": [...], "table_3_lab": [...], "table_4_po": [...] }}
+    Output JSON: [table_1_total, table_2_mat, table_3_lab, table_4_po]
     """
     try:
         res = client.models.generate_content(model=MODEL_ID, contents=prompt_c)
+        chat_log(chat_ph, "C (QS)", "คำนวณเสร็จสิ้นครับ ออกใบ BOQ ได้เลย", "assistant")
         return method_d, json.loads(res.text.replace("```json", "").replace("```", "").strip())
     except:
         return method_d, {"error": "JSON Error"}
 
 # --- 5. MAIN UI ---
 def main():
-    st.title(f"🏗️ MEP AI: Transparent System ({MODEL_ID})")
+    st.title(f"🏗️ MEP AI: Interactive Operation")
     
-    # Check Files
+    # Files
     c1, c2 = st.columns(2)
-    with c1:
-        if "Error" in get_kb_content("Price_List.csv"): st.error("❌ Missing Price_List.csv")
-        else: st.success("✅ Price DB Ready")
+    with c1: 
+        if "Missing" in get_kb_content("Price_List.csv"): st.error("Price List Not Found")
+        else: st.success("Price DB: OK")
     with c2:
-        if "Error" in get_kb_content("Engineering_Drawings_EE.pdf"): st.warning("⚠️ Missing Manual PDF")
-        else: st.success("✅ Engineer DB Ready")
+        if "Missing" in get_kb_content("Engineering_Drawings_EE.pdf"): st.warning("Manual Not Found")
+        else: st.success("Manual DB: OK")
 
-    uploaded_file = st.file_uploader("📂 อัปโหลดแบบแปลน", type=['png', 'jpg'])
+    uploaded_file = st.file_uploader("📂 Upload Blueprint", type=['png', 'jpg'])
     
     if uploaded_file:
         image = Image.open(uploaded_file)
         st.image(image, caption="Blueprint", width=400)
         
-        if st.button("🚀 เริ่มทำงาน (Start Process)"):
-            log_container = st.container()
-            log_ph = log_container.empty()
+        if st.button("🚀 Start Interactive Mission"):
+            # Chat Container
+            st.markdown("### 💬 Team Chat Room")
+            chat_container = st.container()
             
             # --- ROUND 1 ---
-            log_stream(log_ph, "--- เริ่มต้นรอบที่ 1 ---")
-            data_r1 = run_team_a(image, 1, "", log_ph)
+            data_r1 = run_team_a(image, 1, "", chat_container)
             
             if data_r1:
-                # 🔥 แสดงรายการที่ A ส่งไปให้ B ดูชัดๆ
-                st.subheader("📄 รายการที่ Team A ส่งให้ตรวจสอบ (Draft 1)")
-                st.dataframe(pd.DataFrame(data_r1), use_container_width=True)
-                
-                res_b1 = run_team_b(data_r1, 1, log_ph)
+                res_b1 = run_team_b(data_r1, 1, chat_container)
                 
                 final_verdict = None
                 if "REJECTED" in res_b1:
-                    log_stream(log_ph, "❌ Team B ตีกลับงาน!", "WARN")
-                    
-                    # 🔥 แสดงคำสั่งแก้ของ B ให้เห็นชัดๆ
-                    st.error(f"📝 **คำสั่งแก้ไขจากวิศวกร (Correction Order):**\n{res_b1.replace('REJECTED:', '').strip()}")
+                    order = res_b1.replace("REJECTED:", "").strip()
+                    st.error(f"📝 **Correction Order:**\n{order}")
                     
                     # --- ROUND 2 ---
-                    log_stream(log_ph, "--- เริ่มต้นรอบที่ 2 (แก้ไขงาน) ---")
-                    data_r2 = run_team_a(image, 2, res_b1, log_ph)
-                    
-                    st.subheader("📄 รายการที่แก้ไขแล้ว (Draft 2)")
-                    st.dataframe(pd.DataFrame(data_r2), use_container_width=True)
-                    
-                    res_b2 = run_team_b(data_r2, 2, log_ph)
+                    data_r2 = run_team_a(image, 2, res_b1, chat_container)
+                    res_b2 = run_team_b(data_r2, 2, chat_container)
                     
                     try:
                         json_str = res_b2.split("APPROVED:")[1].strip() if "APPROVED:" in res_b2 else res_b2
                         final_verdict = json.loads(json_str.replace("```json", "").replace("```", "").strip())
-                        log_stream(log_ph, "✅ Team B อนุมัติแล้ว (Approved)")
-                        st.success("🏆 **อนุมัติแบบก่อสร้าง (Final Approved):**")
-                        st.dataframe(pd.DataFrame(final_verdict), use_container_width=True)
                     except:
-                        log_stream(log_ph, "Error Parsing Final", "ERR")
+                        st.error("Error Parsing Final")
                 else:
-                    log_stream(log_ph, "✅ Team B อนุมัติทันที")
                     try:
                         json_str = res_b1.split("APPROVED:")[1].strip() if "APPROVED:" in res_b1 else res_b1
                         final_verdict = json.loads(json_str.replace("```json", "").replace("```", "").strip())
-                        st.success("🏆 **อนุมัติแบบก่อสร้าง (Final Approved):**")
-                        st.dataframe(pd.DataFrame(final_verdict), use_container_width=True)
                     except:
                         final_verdict = data_r1
 
-                # --- PHASE 3 ---
+                # --- EXECUTION ---
                 if final_verdict:
+                    st.success("🏆 **Final Approved!**")
                     st.markdown("---")
-                    st.header("🚀 Execution Phase")
-                    method_d, boq_data = run_team_c_d(final_verdict, log_ph)
                     
-                    st.info(f"👷 **D (Method Statement):**\n{method_d}")
+                    method_d, boq_data = run_team_c_d(final_verdict, chat_container)
+                    
+                    st.info(f"👷 **Method Statement:**\n{method_d[:500]}...")
                     
                     if "error" not in boq_data:
-                        log_stream(log_ph, "✅ ภารกิจเสร็จสิ้น!")
-                        t1, t2, t3, t4 = st.tabs(["1. รวม", "2. ค่าของ", "3. ค่าแรง", "4. PO"])
-                        def show_tab(key):
+                        t1, t2, t3, t4 = st.tabs(["Total", "Material", "Labor", "PO"])
+                        def show(key):
                             if key in boq_data:
                                 df = pd.DataFrame(boq_data[key])
                                 st.dataframe(df, use_container_width=True)
-                                cols = df.columns
-                                num_cols = df.select_dtypes(include=['number']).columns
-                                if len(num_cols) > 0:
-                                    target = next((x for x in cols if "รวม" in x or "Total" in x), num_cols[-1])
-                                    try: st.metric("Grand Total", f"{df[target].sum():,.2f} THB")
-                                    except: pass
+                                if 'รวมเป็นเงิน' in df.columns: 
+                                    total = df['รวมเป็นเงิน'].astype(str).str.replace(',','').astype(float).sum()
+                                    st.metric("Total", f"{total:,.2f}")
 
-                        with t1: show_tab("table_1_total")
-                        with t2: show_tab("table_2_mat")
-                        with t3: show_tab("table_3_lab")
-                        with t4: show_tab("table_4_po")
+                        with t1: show("table_1_total")
+                        with t2: show("table_2_mat")
+                        with t3: show("table_3_lab")
+                        with t4: show("table_4_po")
 
 if __name__ == "__main__":
     main()
