@@ -11,7 +11,7 @@ from pypdf import PdfReader
 st.set_page_config(page_title="AI Engineer: Universal Mode", layout="wide", page_icon="🛡️")
 
 # 🔑 API KEY (ใส่ Key ของคุณ)
-API_KEY = "AIzaSyCWlcMMJddJ5xJQGKeEU8Cn2fcCIx3upXI"
+API_KEY = "AIzaSyBk9zUBY6TuYO13QxPw6ZVziENedIx0yJA"
 
 # ฟังก์ชันเลือกโมเดลอัตโนมัติ (กันตาย)
 def get_working_model(api_key):
@@ -243,3 +243,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
