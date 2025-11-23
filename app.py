@@ -1,5 +1,6 @@
 import streamlit as st
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import pandas as pd
 import json
 import time
@@ -7,52 +8,69 @@ import os
 from PIL import Image
 from pypdf import PdfReader
 
-# --- 1. CONFIGURATION & ROBUST SETUP ---
-st.set_page_config(page_title="AI Engineer: Universal Mode", layout="wide", page_icon="🛡️")
+# --- 1. CONFIGURATION ---
+st.set_page_config(page_title="MEP AI: Advanced System", layout="wide", page_icon="🏗️")
 
 # 🔑 API KEY (ใส่ Key ของคุณ)
 API_KEY = "AIzaSyBk9zUBY6TuYO13QxPw6ZVziENedIx0yJA"
 
-# ฟังก์ชันเลือกโมเดลอัตโนมัติ (กันตาย)
-def get_working_model(api_key):
-    genai.configure(api_key=api_key)
-    
-    # รายชื่อโมเดลที่จะไล่เช็ค (จากใหม่ไปเก่า)
-    candidate_models = [
-        'gemini-1.5-flash', 
-        'gemini-1.5-flash-latest',
-        'gemini-1.5-pro',
-        'gemini-1.5-pro-latest',
-        'gemini-pro',       # รุ่นมาตรฐาน (เสถียรสุด)
-        'gemini-1.0-pro'
-    ]
-    
-    status_text = []
-    active_model = None
-    
-    # วนลูปหาตัวที่ใช้ได้
-    for model_name in candidate_models:
-        try:
-            # ลอง Test ยิงคำถามง่ายๆ
-            test_model = genai.GenerativeModel(model_name)
-            response = test_model.generate_content("Hi")
-            if response:
-                active_model = test_model
-                status_text.append(f"✅ {model_name}: ใช้งานได้!")
-                break # เจอแล้วหยุดหา
-        except Exception as e:
-            status_text.append(f"❌ {model_name}: ใช้ไม่ได้ ({str(e)[:50]}...)")
-            
-    return active_model, status_text
+# 🔥 AUTO-DETECT MODEL (ระบบเลือกโมเดลอัจฉริยะ)
+def get_client_and_model():
+    try:
+        client = genai.Client(api_key=API_KEY)
+        
+        # รายชื่อโมเดลที่จะลอง (เรียงจากใหม่ไปเก่า)
+        candidate_models = [
+            'gemini-2.5-flash',      # ตัวใหม่ล่าสุดที่คุณต้องการ
+            'gemini-1.5-flash',      # ตัวรองที่เร็ว
+            'gemini-1.5-pro',        # ตัวฉลาด
+            'gemini-1.0-pro'         # ตัวกันตาย
+        ]
+        
+        for model_name in candidate_models:
+            try:
+                # ลองยิง Test เบาๆ
+                client.models.generate_content(model=model_name, contents="Hi")
+                return client, model_name # เจอตัวที่ใช้ได้ ส่งกลับเลย
+            except:
+                continue # ถ้าพัง ให้ลองตัวถัดไป
+                
+        return None, None
+    except Exception as e:
+        st.error(f"Client Init Error: {e}")
+        return None, None
 
-# เริ่มต้นระบบเลือกโมเดล
-with st.spinner("🤖 กำลังค้นหาโมเดล AI ที่ดีที่สุดสำหรับ Server นี้..."):
-    model, model_logs = get_working_model(API_KEY)
+# เริ่มต้นระบบเชื่อมต่อ AI
+with st.spinner("🤖 กำลังจูนเครื่องยนต์ AI (ค้นหาโมเดลที่ดีที่สุด)..."):
+    client, MODEL_ID = get_client_and_model()
 
-# --- 2. KNOWLEDGE BASE FUNCTIONS ---
+if not client:
+    st.error("🚨 Critical Error: ไม่สามารถเชื่อมต่อกับ Google AI ได้เลยทุกโมเดล (เช็ค API Key หรือโควต้า)")
+    st.stop()
+else:
+    st.success(f"✅ เชื่อมต่อสำเร็จ! ระบบเลือกใช้งานโมเดล: **{MODEL_ID}**")
 
+# --- 2. HELPER FUNCTIONS (ฟังก์ชันกลาง) ---
+def generate_content(prompt_text, image=None):
+    """เรียก AI ด้วยโมเดลที่เลือกมาแล้ว"""
+    try:
+        if image:
+            response = client.models.generate_content(
+                model=MODEL_ID,
+                contents=[prompt_text, image]
+            )
+        else:
+            response = client.models.generate_content(
+                model=MODEL_ID,
+                contents=prompt_text
+            )
+        return response.text
+    except Exception as e:
+        return f"Error generation: {e}"
+
+# --- 3. KNOWLEDGE BASE FUNCTIONS ---
 def get_manual_content():
-    """อ่านคู่มือ PDF จาก GitHub"""
+    """อ่านคู่มือ PDF"""
     manual_path = "Manuals"
     text = ""
     if os.path.exists(manual_path):
@@ -60,141 +78,103 @@ def get_manual_content():
             if f.endswith(".pdf"):
                 try:
                     reader = PdfReader(os.path.join(manual_path, f))
-                    # อ่านแค่ 20 หน้าแรกเพื่อความรวดเร็ว
+                    # อ่าน 20 หน้าแรก
                     for i, page in enumerate(reader.pages[:20]): 
                         text += page.extract_text() + "\n"
                 except: pass
     return text if text else "ไม่พบคู่มือ PDF (ใช้กฎพื้นฐาน)"
 
 def get_price_list_content():
-    """อ่านบัญชีราคา CSV จาก GitHub"""
+    """อ่านบัญชีราคา CSV"""
     manual_path = "Manuals"
     csv_file = os.path.join(manual_path, "Price_List.csv")
-    
     if os.path.exists(csv_file):
         try:
             df = pd.read_csv(csv_file)
             return df.to_markdown(index=False)
-        except Exception as e:
-            return f"Error reading CSV: {e}"
+        except: return "Error reading CSV"
     return "ไม่พบไฟล์ Price_List.csv"
 
-# --- 3. AGENT PROMPTS (THE 6x6 SYSTEM) ---
+# --- 4. AGENT PROMPTS (6x6 Logic) ---
 
 def run_agent_a_group(image):
-    """ทีม A: สถาปนิก 6 คน"""
-    if not model: return {"Error": "AI Model not found"}
+    """ทีม A: สถาปนิก 6 คน (จำลองด้วย AI ตัวเดียวเพื่อความเร็ว)"""
+    legend = "Legend: Circle+X=Downlight, Rect=Fluorescent, Circle+Lines=Outlet, S=Switch"
     
-    legend = "Legend: Circle+X=Downlight, Rect=Fluorescent, Circle+Lines=Outlet"
-    prompts = {
-        "A1 (Grid Scanner)": f"แบ่งภาพเป็นส่วนๆ ค้นหาอุปกรณ์ไฟฟ้าละเอียด อ้างอิง: {legend}",
-        "A2 (Symbol Matcher)": f"ค้นหาเฉพาะสัญลักษณ์ที่ตรงกับ Legend: {legend}",
-        "A3 (Text Reader)": "อ่าน Text Label ที่กำกับอุปกรณ์ (เช่น 'WP', 'TV')",
-        "A4 (Context Analyzer)": "วิเคราะห์ตามบริบทห้อง (เช่น ห้องน้ำ, ครัว)",
-        "A5 (Line Tracer)": "ไล่เส้นสายไฟหาปลายทาง",
-        "A6 (Consolidator)": "รวมข้อมูลจาก A1-A5 ตัดตัวซ้ำ สรุปยอดเป็น JSON"
-    }
+    prompt = f"""
+    คุณคือทีมสถาปนิก 6 คน ช่วยกันถอดแบบไฟฟ้าจากภาพนี้
+    อ้างอิงสัญลักษณ์: {legend}
     
-    results = {}
-    progress = st.progress(0)
-    idx = 0
+    คำสั่ง:
+    1. กวาดสายตาทั่วแบบ (Grid Scan)
+    2. อ่าน Text ที่กำกับอุปกรณ์ (Text Reader)
+    3. วิเคราะห์ตามบริบทห้อง (Context)
     
-    for name, p in prompts.items():
-        try:
-            response = model.generate_content([p, image])
-            results[name] = response.text
-        except Exception as e:
-            results[name] = f"Error: {e}"
-        idx += 1
-        progress.progress(idx / 6)
-        time.sleep(1)
-        
-    return results
-
-def run_agent_b_group(a_results):
-    """ทีม B: วิศวกร 6 คน"""
-    if not model: return {"Error": "AI Model not found"}
-    
-    consolidated_data = a_results.get("A6 (Consolidator)", str(a_results))
-    real_manual = get_manual_content()
-    
-    prompts = {
-        "B1 (Safety)": "ตรวจความปลอดภัย (กันน้ำ, สายดิน, เบรกเกอร์)",
-        "B2 (Standard)": "ตรวจมาตรฐานติดตั้ง (ความสูง, ระยะห่าง)",
-        "B3 (Design)": "ตรวจความสมเหตุสมผลการใช้งาน",
-        "B4 (Spec Check)": "ตรวจสเปควัสดุเทียบตลาด",
-        "B5 (Load Calc)": "คำนวณโหลดไฟฟ้าคร่าวๆ",
-        "B6 (Chief Engineer)": "สรุป Final Draft เพื่อส่งต่อ QS"
-    }
-    
-    results = {}
-    progress = st.progress(0)
-    idx = 0
-    
-    for name, p in prompts.items():
-        full_prompt = f"""
-        บทบาท: {name}
-        Manual Ref: {real_manual[:10000]}...
-        Data: {consolidated_data}
-        คำสั่ง: ตรวจสอบและให้ความเห็น (Approved/Rejected)
-        """
-        try:
-            response = model.generate_content(full_prompt)
-            results[name] = response.text
-        except Exception as e:
-            results[name] = f"Error: {e}"
-        idx += 1
-        progress.progress(idx / 6)
-        
-    return results
-
-def run_agent_c_d(final_draft):
-    """ทีม C & D: คิดเงินและสั่งงาน"""
-    if not model: return "Error", "Error"
-    
-    real_price_list = get_price_list_content()
-    
-    # D ทำงาน
-    prompt_d = f"เขียน 'วิธีทำ (Method Statement)' สำหรับช่าง จากข้อมูล: {final_draft}"
-    try:
-        method_d = model.generate_content(prompt_d).text
-    except: method_d = "Error generating Manual"
-
-    # C ทำงาน
-    prompt_c = f"""
-    คุณคือ C (QS). ทำ BOQ 4 ตาราง โดยใช้ราคาจาก CSV เท่านั้น.
-    Price List: {real_price_list}
-    Data: {final_draft}
-    Method: {method_d}
-    Output Format: JSON with keys [Table_Total, Table_Material, Table_Labor, Table_PO]
+    สรุปรายการอุปกรณ์ทั้งหมดออกมาเป็น JSON List:
+    [
+      {{"room": "Living Room", "item": "Downlight", "spec": "9W LED", "qty": 4}},
+      {{"room": "Bathroom", "item": "Waterproof Outlet", "spec": "IP44", "qty": 1}}
+    ]
     """
     try:
-        response_c = model.generate_content(prompt_c)
-        boq_data = json.loads(response_c.text.replace("```json", "").replace("```", "").strip())
-    except:
-        boq_data = {"error": "JSON Error"}
-        
-    return method_d, boq_data
+        text_resp = generate_content(prompt, image)
+        clean_json = text_resp.replace("```json", "").replace("```", "").strip()
+        return json.loads(clean_json)
+    except: return []
 
-# --- 4. MAIN APP UI ---
-def main():
-    st.title("🛡️ AI Engineer: Universal Version")
+def run_agent_b_group(data):
+    """ทีม B: วิศวกรตรวจสอบ"""
+    manual = get_manual_content()
+    prompt = f"""
+    คุณคือทีมวิศวกรตรวจสอบ 6 คน (Safety, Standard, Design, Spec, Load, Chief)
     
-    # Debugging Section (ซ่อนได้)
-    with st.expander("🛠️ System Status & Debugging Logs"):
-        st.write(f"**Python Library Version:** `google-generativeai {genai.__version__}`")
-        st.write("**Model Connection Check:**")
-        for log in model_logs:
-            if "✅" in log: st.success(log)
-            else: st.error(log)
-            
-    if not model:
-        st.error("🚨 Critical Error: ไม่สามารถเชื่อมต่อ Google AI ได้เลยทุกโมเดล กรุณาเช็ค API Key")
-        st.stop()
-    else:
-        st.info("🟢 System Online: พร้อมทำงานด้วยโมเดลที่เสถียรที่สุด")
+    --- กฎหมายและมาตรฐาน (PDF) ---
+    {manual[:10000]}...
+    -----------------------------
+    
+    ข้อมูลหน้างาน: {json.dumps(data, ensure_ascii=False)}
+    
+    คำสั่ง: 
+    ตรวจสอบรายการทั้งหมดว่า "ผ่าน" หรือ "ไม่ผ่าน" ตามคู่มือ
+    ถ้าผ่าน ตอบ "APPROVED"
+    ถ้าไม่ผ่าน ตอบ "REJECTED: [ระบุสาเหตุและวิธีแก้]"
+    """
+    return generate_content(prompt)
 
-    # File Checks
+def run_agent_c_d(data):
+    """ทีม C & D: คิดเงินและสั่งงาน"""
+    price_list = get_price_list_content()
+    
+    # D: เขียนวิธีทำ
+    prompt_d = f"เขียน 'วิธีทำ (Method Statement)' สำหรับช่าง จากข้อมูล: {json.dumps(data, ensure_ascii=False)}"
+    method = generate_content(prompt_d)
+    
+    # C: คิดเงิน
+    prompt_c = f"""
+    คุณคือ C (QS). ทำ BOQ 4 ตาราง โดยใช้ราคาจาก CSV เท่านั้น.
+    
+    --- บัญชีราคากลาง (CSV) ---
+    {price_list}
+    ---------------------------
+    
+    ข้อมูล: {json.dumps(data, ensure_ascii=False)}
+    วิธีทำ: {method}
+    
+    คำสั่ง: สร้าง JSON Data สำหรับ 4 ตาราง:
+    Output JSON Keys: [Table_Total, Table_Material, Table_Labor, Table_PO]
+    """
+    try:
+        text_resp = generate_content(prompt_c)
+        boq = json.loads(text_resp.replace("```json", "").replace("```", "").strip())
+    except: boq = {"error": "JSON Error"}
+    
+    return method, boq
+
+# --- 5. MAIN UI ---
+def main():
+    st.title(f"🚀 MEP AI System (Engine: {MODEL_ID})")
+    
+    # Check Files Status
     c1, c2 = st.columns(2)
     with c1:
         if "Price_List.csv" in get_price_list_content(): st.error("⚠️ Missing Price_List.csv")
@@ -203,44 +183,47 @@ def main():
         if "ไม่พบ" in get_manual_content(): st.warning("⚠️ Missing PDF Manual")
         else: st.success("✅ Engineering DB Connected")
 
-    # Upload
     uploaded_file = st.file_uploader("📂 อัปโหลดแบบแปลน", type=['png', 'jpg'])
-
-    if uploaded_file and st.button("🚀 รันระบบ 6x6 Agents"):
+    
+    if uploaded_file and st.button("🚀 รันระบบเต็มรูปแบบ"):
         image = Image.open(uploaded_file)
         st.image(image, caption="Blueprint", width=400)
         
         # Phase 1: A
-        st.header("1. ทีมสถาปนิก 6 คน (A1-A6)")
-        a_results = run_agent_a_group(image)
-        for k,v in a_results.items(): st.write(f"**{k}:** {v[:100]}...")
+        st.header("1. ทีมสถาปนิก (A) ถอดแบบ")
+        with st.spinner("กำลังสแกนแบบ..."):
+            data = run_agent_a_group(image)
+            st.json(data)
             
         # Phase 2: B
-        st.header("2. ทีมวิศวกร 6 คน (B1-B6)")
-        b_results = run_agent_b_group(a_results)
-        final_verdict = b_results.get("B6 (Chief Engineer)", "")
-        st.success(f"🏆 Final Verdict:\n{final_verdict}")
-
-        # Phase 3: C & D
-        st.header("3. สรุปราคาและสั่งงาน")
-        with st.spinner("กำลังคำนวณราคาและเขียนคู่มือ..."):
-            method_d, boq_data = run_agent_c_d(final_verdict)
-            
-            st.info(f"👷 **Method Statement:**\n{method_d[:300]}...")
-            
-            if "error" not in boq_data:
-                tab1, tab2, tab3, tab4 = st.tabs(["Total", "Material", "Labor", "PO"])
-                def show_df(key):
-                    if key in boq_data:
-                        df = pd.DataFrame(boq_data[key])
-                        st.dataframe(df, use_container_width=True)
-                        if 'Total' in df.columns: st.metric("รวม", f"{df['Total'].sum():,.2f}")
+        st.header("2. ทีมวิศวกร (B) ตรวจสอบ")
+        with st.spinner("กำลังตรวจมาตรฐาน..."):
+            res_b = run_agent_b_group(data)
+            if "APPROVED" in res_b:
+                st.success(f"🏆 ผลตรวจ: {res_b}")
                 
-                with tab1: show_df("Table_Total")
-                with tab2: show_df("Table_Material")
-                with tab3: show_df("Table_Labor")
-                with tab4: show_df("Table_PO")
+                # Phase 3: C & D
+                st.markdown("---")
+                st.header("3. สรุปราคาและสั่งงาน")
+                with st.spinner("กำลังคำนวณราคา..."):
+                    method, boq = run_agent_c_d(data)
+                    
+                    st.info(f"👷 **คู่มือช่าง:**\n{method[:300]}...")
+                    
+                    if "error" not in boq:
+                        tab1, tab2, tab3, tab4 = st.tabs(["รวม", "ค่าของ", "ค่าแรง", "PO"])
+                        def show_df(key):
+                            if key in boq:
+                                df = pd.DataFrame(boq[key])
+                                st.dataframe(df, use_container_width=True)
+                                if 'Total' in df.columns: st.metric("รวม", f"{df['Total'].sum():,.2f}")
+                        
+                        with tab1: show_df("Table_Total")
+                        with tab2: show_df("Table_Material")
+                        with tab3: show_df("Table_Labor")
+                        with tab4: show_df("Table_PO")
+            else:
+                st.error(f"❌ แบบไม่ผ่าน: {res_b}")
 
 if __name__ == "__main__":
     main()
-
